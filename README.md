@@ -181,9 +181,19 @@ richiesta — non sono necessariamente in sequenza nuova→primo quarto→
 piena→ultimo quarto nel JSON.
 
 Se impostata la variabile `PLANETARIUM_API_KEY`, tutte le chiamate (tranne
-`/api/v1/health`) richiedono l'header `X-API-Key`.
+`/api/v1/health`) richiedono l'header `X-API-Key` — vedi sotto per come è
+pensata la catena di fiducia.
 
 ## Deploy: nginx + WireGuard
+
+Topologia: `planetarium-api` gira su un host interno (qui: dedalus,
+`10.10.0.3` su `wg0`), raggiungibile **solo in HTTP in chiaro dentro il
+tunnel WireGuard**, mai sull'interfaccia pubblica. TLS/certificati e
+l'esposizione verso internet sono responsabilità di nginx su un'altra VPS,
+che fa da reverse proxy verso dedalus attraverso il tunnel. Questo è
+corretto perché WireGuard fornisce già cifratura e autenticazione a
+livello di trasporto: aggiungere TLS anche sul tratto interno sarebbe
+ridondante.
 
 Il container va bindato **solo sull'IP dell'interfaccia WireGuard**, mai su
 `0.0.0.0` (già configurato così in `docker-compose.yml`/`.env.example`):
@@ -193,8 +203,40 @@ ports:
   - "10.10.0.3:8484:8484"
 ```
 
-Sul VPS con nginx, reverse proxy verso quell'IP via tunnel WG, con rate
-limiting e inoltro dell'header `X-API-Key`.
+### `PLANETARIUM_API_KEY`: segreto interno nginx↔backend
+
+```
+client esterno ──(auth/TLS a discrezione di nginx)──> nginx (VPS pubblica)
+                                                           │
+                                              inietta X-API-Key FISSA
+                                                           ▼
+                                          dedalus:8484 (via WG, solo HTTP)
+```
+
+Non è un token che il client esterno deve conoscere: è nginx a iniettarlo,
+sempre uguale, su ogni richiesta proxata verso dedalus — indipendentemente
+da cosa manda il chiamante. Serve come seconda barriera nel caso la rete
+WG sia condivisa con altri peer non fidati (con un tunnel punto-punto
+dedicato l'handshake WG è già di per sé un controllo d'accesso sufficiente,
+ma costa comunque poco tenerla attiva).
+
+Generare la chiave con `openssl rand -hex 32`, metterla nel `.env` **sia**
+di dedalus (`PLANETARIUM_API_KEY=...`, mai in git) **sia** nella config
+nginx (stesso valore):
+
+```nginx
+# /etc/nginx/secrets/planetarium.conf — permessi 600, root:root, MAI nel vhost pubblico
+set $planetarium_api_key "il-valore-generato-con-openssl";
+
+server {
+    location /planetarium/ {
+        include /etc/nginx/secrets/planetarium.conf;
+        proxy_pass http://10.10.0.3:8484/;
+        proxy_set_header X-API-Key $planetarium_api_key;   # fissa, non dal client
+        limit_req zone=planetarium_rl burst=20 nodelay;
+    }
+}
+```
 
 ## MCP
 
