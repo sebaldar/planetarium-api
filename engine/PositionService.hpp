@@ -67,4 +67,73 @@ std::vector<BodyPosition> computeBodyPositions (
 	SolarSystem & system
 );
 
+
+// ------------------------------------------------------------------
+// Alba / tramonto
+// ------------------------------------------------------------------
+//
+// A differenza di Earth::sunRise (che cerca uno zero entro +-0.01 giorni
+// dal JD passato -- pensata per essere richiamata con una stima già
+// vicina, dal loop del visualizzatore interattivo), qui la ricerca è
+// fatta da zero: scansione grossolana in avanti da JD (fino a +2 giorni)
+// per trovare i cambi di segno di sunAngleOverOrizont(t,lat,lon)+0.83
+// (la costante di rifrazione/semidiametro usata dal motore originale),
+// poi bisezione. Deterministico, nessuna dipendenza da orologio di
+// sistema o da CMat.
+struct SunEvents {
+	bool   sunrise_found = false;
+	double next_sunrise_jd = 0;   // prossima alba a partire da JD
+
+	bool   sunset_found = false;
+	double next_sunset_jd = 0;    // prossimo tramonto a partire da JD
+};
+
+SunEvents computeSunEvents (
+	double JD,
+	const Observer & observer,
+	SolarSystem & system
+);
+
+
+// ------------------------------------------------------------------
+// Equinozi e solstizi
+// ------------------------------------------------------------------
+//
+// Wrapper diretto di Earth::marchEquinox/juneSolstice/septemberEquinox/
+// decemberSolstice (root-finding via CMat, già presente nel motore).
+// Lancia std::runtime_error se il motore non riesce a convergere.
+struct SeasonEvents {
+	short  year = 0;
+	double march_equinox_jd = 0;
+	double june_solstice_jd = 0;
+	double september_equinox_jd = 0;
+	double december_solstice_jd = 0;
+};
+
+SeasonEvents computeSeasons ( short year, SolarSystem & system );
+
+
+// ------------------------------------------------------------------
+// Fase lunare
+// ------------------------------------------------------------------
+//
+// angle_me_deg segue la convenzione di Moon::angleME:
+// 0° = luna nuova, 90° = primo quarto, 180° = luna piena, 270° = ultimo quarto.
+// Le prossime occorrenze sono trovate stimando un JD di innesco (velocità
+// sinodica media ~12.19°/giorno) e rifinendo con Moon::phases (CMat).
+struct MoonPhaseInfo {
+	double angle_me_deg = 0;      // fase attuale
+	double illumination = 0;      // frazione illuminata del disco, 0-1
+	std::string phase_name;       // nome qualitativo (italiano)
+
+	double next_new_moon_jd = 0;
+	double next_first_quarter_jd = 0;
+	double next_full_moon_jd = 0;
+	double next_last_quarter_jd = 0;
+};
+
+// Lancia std::runtime_error se il motore non riesce a convergere su una
+// delle quattro fasi.
+MoonPhaseInfo computeMoonPhase ( double JD, SolarSystem & system );
+
 #endif // _position_service_

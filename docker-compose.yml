@@ -4,10 +4,10 @@ services:
     image: planetarium-api:latest
     container_name: planetarium-api
     restart: unless-stopped
-    # In produzione: bind SOLO sull'IP dell'interfaccia WireGuard, mai su
-    # 0.0.0.0. Esempio: "10.66.0.2:8484:8484"
+    # Bind SOLO sull'IP dell'interfaccia WireGuard di questo host, mai su
+    # 0.0.0.0. In locale (senza wg attivo) sovrascrivere BIND_ADDR in .env.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${PLANETARIUM_PORT:-8484}:8484"
+      - "${BIND_ADDR:-10.10.0.3}:${PLANETARIUM_PORT:-8484}:8484"
     volumes:
       - ./data/vsop87:/app/data/vsop87:ro
       - ./data/elp:/app/data/elp:ro

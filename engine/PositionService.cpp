@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <stdexcept>
 
 #include <celestial_body.hpp>
 #include <orbit.hpp>
@@ -15,6 +17,36 @@ std::string toLower ( std::string s ) {
 	std::transform( s.begin(), s.end(), s.begin(),
 		[]( unsigned char c ) { return std::tolower(c); } );
 	return s;
+}
+
+const double PI = 3.14159265358979323846;
+
+// Bisezione generica: richiede f(a) e f(b) di segno opposto.
+template <typename F>
+double bisect ( F f, double a, double b, int iterations = 30 ) {
+	double fa = f( a );
+	for ( int i = 0; i < iterations; i++ ) {
+		double m  = 0.5 * ( a + b );
+		double fm = f( m );
+		if ( ( fa < 0 ) == ( fm < 0 ) ) { a = m; fa = fm; }
+		else                            { b = m; }
+	}
+	return 0.5 * ( a + b );
+}
+
+std::string phaseName ( double angleDeg ) {
+	double a = std::fmod( angleDeg, 360.0 );
+	if ( a < 0 ) a += 360.0;
+
+	if ( a <  22.5 ) return "nuova";
+	if ( a <  67.5 ) return "crescente";
+	if ( a < 112.5 ) return "primo quarto";
+	if ( a < 157.5 ) return "gibbosa crescente";
+	if ( a < 202.5 ) return "piena";
+	if ( a < 247.5 ) return "gibbosa calante";
+	if ( a < 292.5 ) return "ultimo quarto";
+	if ( a < 337.5 ) return "calante";
+	return "nuova";
 }
 
 // Costruisce il BodyPosition a partire dalle coordinate equatoriali/XYZ
@@ -176,4 +208,143 @@ std::vector<BodyPosition> computeBodyPositions (
 	}
 
 	return out;
+}
+
+
+SunEvents computeSunEvents (
+	double JD,
+	const Observer & observer,
+	SolarSystem & system
+) {
+	Earth & earth = system.earth;
+
+	// stessa correzione (rifrazione + semidiametro) usata da Earth::sunRise
+	auto f = [&]( double t ) -> double {
+		return earth.sunAngleOverOrizont( t, observer.latitude, observer.longitude ) + 0.83;
+	};
+
+	const double stepDays   = 10.0 / 1440.0; // passo di scansione: 10 minuti
+	const double windowDays = 2.0;           // cerca fino a 2 giorni in avanti
+	const int    steps      = static_cast<int>( windowDays / stepDays );
+
+	SunEvents result;
+
+	double tPrev = JD;
+	double fPrev = f( tPrev );
+
+	for ( int i = 1; i <= steps && !( result.sunrise_found && result.sunset_found ); i++ ) {
+
+		double tCur = JD + i * stepDays;
+		double fCur = f( tCur );
+
+		if ( fPrev < 0 && fCur >= 0 && !result.sunrise_found ) {
+			result.next_sunrise_jd = bisect( f, tPrev, tCur );
+			result.sunrise_found   = true;
+		} else if ( fPrev >= 0 && fCur < 0 && !result.sunset_found ) {
+			result.next_sunset_jd = bisect( f, tPrev, tCur );
+			result.sunset_found   = true;
+		}
+
+		tPrev = tCur;
+		fPrev = fCur;
+	}
+
+	return result;
+}
+
+
+SeasonEvents computeSeasons ( short year, SolarSystem & system ) {
+
+	Earth & earth = system.earth;
+	SeasonEvents result;
+	result.year = year;
+
+	// Earth::marchEquinox/juneSolstice/... (motore CMat) lanciano, a
+	// seconda del punto di fallimento, std::string oppure const char*
+	// (stile legacy, non std::exception): li normalizziamo qui in
+	// std::runtime_error così il chiamante (l'endpoint HTTP) ha un
+	// solo tipo da intercettare.
+	try {
+		result.march_equinox_jd     = earth.marchEquinox( year );
+		result.june_solstice_jd     = earth.juneSolstice( year );
+		result.september_equinox_jd = earth.septemberEquinox( year );
+		result.december_solstice_jd = earth.decemberSolstice( year );
+	}
+	catch ( const std::string & e ) { throw std::runtime_error( e ); }
+	catch ( const char * e )        { throw std::runtime_error( e ); }
+
+	return result;
+}
+
+
+// NOTA IMPORTANTE: qui NON usiamo Moon::angleME / Moon::phases del motore
+// originale. Verificato empiricamente (campionando angleME su un mese
+// sinodico intero) che quella funzione non è monotona: usa fabs() sulla
+// differenza di due longitudini normalizzate indipendentemente in
+// [0,360), il che la fa "ripiegare" invece di progredire 0->360 nel
+// ciclo (es. valori che dovrebbero salire restano bloccati vicino a 0
+// e poi saltano di colpo a ~360). Come conseguenza anche Moon::phases
+// (che fa root-finding su quella stessa funzione via Newton-Raphson,
+// CMat) converge in modo inaffidabile: un seed "5 giorni nel futuro" ha
+// prodotto un risultato "5 giorni nel passato" durante il test.
+//
+// La grandezza corretta è ricavata direttamente dalle longitudini
+// eclittiche di Sole e Luna (le stesse, già validate, usate in
+// computeBodyPositions): fase = (L_luna - L_sole) mod 360. Campionata
+// sullo stesso mese sinodico risulta monotona e pulita, un solo
+// passaggio per 0/90/180/270 come atteso. La prossima occorrenza di
+// ciascuna fase è quindi trovata con scansione grossolana + bisezione
+// (stesso schema di computeSunEvents), non con il risolutore del motore.
+double phaseAngle ( double t, SolarSystem & system ) {
+	OrbitEcli sunEc  = system.sun.orbitLBR( t );
+	OrbitEcli moonEc = system.moon.orbitAlfaELP( t );
+	return std::fmod( moonEc.L - sunEc.L + 720.0, 360.0 ); // [0,360)
+}
+
+MoonPhaseInfo computeMoonPhase ( double JD, SolarSystem & system ) {
+
+	MoonPhaseInfo info;
+
+	double angle = phaseAngle( JD, system );
+	info.angle_me_deg = angle;
+	info.illumination = ( 1.0 - std::cos( angle * PI / 180.0 ) ) / 2.0;
+	info.phase_name   = phaseName( angle );
+
+	const double synodicMonth = 29.530588853; // giorni, media
+
+	// distanza angolare firmata (fase(t) - target), avvolta in (-180,180],
+	// così attraversa lo zero esattamente quando fase(t) supera target
+	auto signedDist = [&]( double t, double target ) -> double {
+		double d = std::fmod( phaseAngle( t, system ) - target + 540.0, 360.0 ) - 180.0;
+		return d;
+	};
+
+	auto nextOccurrence = [&]( double target ) -> double {
+		const double stepDays = 6.0 / 24.0; // 6 ore: << 1/4 di mese sinodico
+		const int    steps    = static_cast<int>( ( synodicMonth + 2.0 ) / stepDays );
+
+		double tPrev = JD;
+		double dPrev = signedDist( tPrev, target );
+
+		for ( int i = 1; i <= steps; i++ ) {
+			double tCur = JD + i * stepDays;
+			double dCur = signedDist( tCur, target );
+
+			if ( dPrev < 0 && dCur >= 0 ) {
+				return bisect( [&]( double t ) { return signedDist( t, target ); }, tPrev, tCur );
+			}
+
+			tPrev = tCur;
+			dPrev = dCur;
+		}
+
+		throw std::runtime_error( "impossibile trovare la prossima occorrenza della fase richiesta" );
+	};
+
+	info.next_new_moon_jd      = nextOccurrence(   0.0 );
+	info.next_first_quarter_jd = nextOccurrence(  90.0 );
+	info.next_full_moon_jd     = nextOccurrence( 180.0 );
+	info.next_last_quarter_jd  = nextOccurrence( 270.0 );
+
+	return info;
 }

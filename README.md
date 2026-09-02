@@ -95,17 +95,102 @@ Elenco dei nomi di corpo accettati.
 }
 ```
 
+### `GET /api/v1/sun/events`
+
+Prossima alba/tramonto a partire da `jd` (fino a 2 giorni di ricerca in
+avanti). Scansione grossolana + bisezione su
+`Earth::sunAngleOverOrizont(t,lat,lon) + 0.83` (rifrazione/semidiametro,
+stessa costante usata dal motore originale) — non usa `Earth::sunRise`
+direttamente, che nel codice originale cerca solo entro ±0.01 giorni dal
+seed e non è quindi adatta a una ricerca da un punto qualsiasi.
+
+| Parametro | Obbligatorio |
+|---|---|
+| `jd`  | sì |
+| `lat` | sì |
+| `lon` | sì |
+
+```json
+{
+  "jd": 2461286.0,
+  "observer": { "lat": 45.4642, "lon": 9.19 },
+  "sunrise": { "found": true, "jd": 2461286.6996412035 },
+  "sunset":  { "found": true, "jd": 2461286.2497916670 }
+}
+```
+
+### `GET /api/v1/sun/seasons`
+
+Equinozi e solstizi per un anno solare. Wrapper diretto di
+`Earth::{march,june,september,december}{Equinox,Solstice}` (root-finding
+via CMat, già nel motore).
+
+| Parametro | Obbligatorio |
+|---|---|
+| `year` | sì |
+
+```json
+{
+  "year": 2026,
+  "march_equinox_jd": 2461120.1160331178,
+  "june_solstice_jd": 2461212.8511357964,
+  "september_equinox_jd": 2461306.5044089514,
+  "december_solstice_jd": 2461396.369008027
+}
+```
+
+### `GET /api/v1/moon/phase`
+
+Fase lunare corrente e prossima occorrenza delle 4 fasi principali.
+
+⚠️ **Non usa `Moon::angleME`/`Moon::phases` del motore originale**: verificato
+empiricamente che `angleME` non è monotona (usa `fabs()` su una differenza
+di longitudini normalizzate indipendentemente, che la fa "ripiegare"
+invece di progredire 0→360 nel ciclo sinodico), e di conseguenza anche il
+root-finding di `Moon::phases` converge in modo inaffidabile (un seed nel
+futuro può restituire un risultato nel passato — riprodotto durante il
+test). La fase qui è ricavata dalle longitudini eclittiche di Sole e Luna
+(`sun.orbitLBR`/`moon.orbitAlfaELP`, le stesse già usate e validate in
+`/positions`): `fase = (L_luna - L_sole) mod 360`, verificata monotona su
+un mese sinodico campionato punto per punto. Le prossime occorrenze sono
+trovate con lo stesso schema scan+bisezione di `/sun/events`.
+
+| Parametro | Obbligatorio |
+|---|---|
+| `jd` | sì |
+
+`angle_me_deg`: 0°=nuova, 90°=primo quarto, 180°=piena, 270°=ultimo quarto.
+
+```json
+{
+  "jd": 2461286.0,
+  "angle_me_deg": 246.057,
+  "illumination": 0.7029,
+  "phase_name": "gibbosa calante",
+  "next_last_quarter_jd": 2461287.828,
+  "next_new_moon_jd": 2461294.645,
+  "next_first_quarter_jd": 2461302.365,
+  "next_full_moon_jd": 2461310.202
+}
+```
+
+Nota: i quattro campi `next_*` sono indipendenti (ciascuno è "la prossima
+occorrenza di quella fase specifica da `jd`"), quindi il loro ordine
+cronologico dipende da dove ci si trova nel ciclo al momento della
+richiesta — non sono necessariamente in sequenza nuova→primo quarto→
+piena→ultimo quarto nel JSON.
+
 Se impostata la variabile `PLANETARIUM_API_KEY`, tutte le chiamate (tranne
 `/api/v1/health`) richiedono l'header `X-API-Key`.
 
 ## Deploy: nginx + WireGuard
 
 Il container va bindato **solo sull'IP dell'interfaccia WireGuard**, mai su
-`0.0.0.0`:
+`0.0.0.0` (già configurato così in `docker-compose.yml`/`.env.example`):
 
 ```yaml
 ports:
-  - "10.66.0.2:8484:8484"
+  - "10.10.0.3:8484:8484"
 ```
 
 Sul VPS con nginx, reverse proxy verso quell'IP via tunnel WG, con rate
@@ -130,8 +215,6 @@ Tool esposti: `get_celestial_positions`, `list_supported_bodies`.
 
 - Costellazione/zodiaco/stelle vicine (richiede `SkyGrid` + catalogo
   `stars/`, ~75MB — oggi non incluso in questo repo)
-- Alba/tramonto, equinozi/solstizi, fase lunare, Pasqua (`Earth::sunRise`,
-  `Earth::equinox*`, `Moon::phases`, `Earth::Easter` — già presenti nel
-  motore, non ancora esposti come endpoint)
+- Pasqua (`Earth::Easter`, già presente nel motore, non ancora esposta)
 - Conversione data calendario ↔ JD lato server (oggi il client deve
   fornire `jd` già calcolato)

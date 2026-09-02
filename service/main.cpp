@@ -7,6 +7,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -18,6 +19,13 @@
 #include "PositionService.hpp"
 
 using json = nlohmann::json;
+
+// cpp-httplib serve le richieste con un pool di thread. Le funzioni di
+// PositionService scrivono su membri di SolarSystem (es. system.mercury.
+// position in computeBodyPositions) quindi l'istanza condivisa non è
+// safe per accessi concorrenti: un mutex globale serializza le chiamate
+// al motore. Il calcolo costa sub-millisecondo, seriale va benissimo.
+std::mutex g_engineMutex;
 
 namespace {
 
@@ -32,6 +40,39 @@ std::vector<std::string> splitCsv ( const std::string & s ) {
 		if ( a != std::string::npos ) out.push_back( item.substr( a, b - a + 1 ) );
 	}
 	return out;
+}
+
+json sunEventsToJson ( const SunEvents & e ) {
+	json out;
+	out[ "sunrise" ] = e.sunrise_found
+		? json{ { "jd", e.next_sunrise_jd }, { "found", true } }
+		: json{ { "found", false } };
+	out[ "sunset" ] = e.sunset_found
+		? json{ { "jd", e.next_sunset_jd }, { "found", true } }
+		: json{ { "found", false } };
+	return out;
+}
+
+json seasonsToJson ( const SeasonEvents & s ) {
+	return json{
+		{ "year", s.year },
+		{ "march_equinox_jd",     s.march_equinox_jd },
+		{ "june_solstice_jd",     s.june_solstice_jd },
+		{ "september_equinox_jd", s.september_equinox_jd },
+		{ "december_solstice_jd", s.december_solstice_jd }
+	};
+}
+
+json moonPhaseToJson ( const MoonPhaseInfo & m ) {
+	return json{
+		{ "angle_me_deg",  m.angle_me_deg },
+		{ "illumination",  m.illumination },
+		{ "phase_name",    m.phase_name },
+		{ "next_new_moon_jd",      m.next_new_moon_jd },
+		{ "next_first_quarter_jd", m.next_first_quarter_jd },
+		{ "next_full_moon_jd",     m.next_full_moon_jd },
+		{ "next_last_quarter_jd",  m.next_last_quarter_jd }
+	};
 }
 
 json bodyToJson ( const BodyPosition & b ) {
@@ -129,8 +170,11 @@ int main () {
 				bodies = splitCsv( req.get_param_value( "bodies" ) );
 			}
 
-			std::vector<BodyPosition> positions =
-				computeBodyPositions( jd, observer, bodies, system );
+			std::vector<BodyPosition> positions;
+			{
+				std::lock_guard<std::mutex> lock( g_engineMutex );
+				positions = computeBodyPositions( jd, observer, bodies, system );
+			}
 
 			json bodiesJson = json::array();
 			for ( const auto & b : positions ) bodiesJson.push_back( bodyToJson( b ) );
@@ -149,6 +193,82 @@ int main () {
 
 		} catch ( const std::invalid_argument & e ) {
 			sendError( res, 400, e.what() );
+		} catch ( const std::exception & e ) {
+			sendError( res, 500, std::string( "errore interno: " ) + e.what() );
+		}
+	} );
+
+	svr.Get( "/api/v1/sun/events", [ &system ]( const httplib::Request & req, httplib::Response & res ) {
+
+		if ( !req.has_param( "jd" ) || !req.has_param( "lat" ) || !req.has_param( "lon" ) ) {
+			sendError( res, 400, "parametri obbligatori mancanti: jd, lat, lon" );
+			return;
+		}
+
+		try {
+			double jd = std::stod( req.get_param_value( "jd" ) );
+			Observer observer;
+			observer.latitude  = std::stod( req.get_param_value( "lat" ) );
+			observer.longitude = std::stod( req.get_param_value( "lon" ) );
+
+			SunEvents events;
+			{
+				std::lock_guard<std::mutex> lock( g_engineMutex );
+				events = computeSunEvents( jd, observer, system );
+			}
+
+			json out = sunEventsToJson( events );
+			out[ "jd" ] = jd;
+			out[ "observer" ] = { { "lat", observer.latitude }, { "lon", observer.longitude } };
+
+			res.set_content( out.dump(), "application/json" );
+
+		} catch ( const std::exception & e ) {
+			sendError( res, 500, std::string( "errore interno: " ) + e.what() );
+		}
+	} );
+
+	svr.Get( "/api/v1/sun/seasons", [ &system ]( const httplib::Request & req, httplib::Response & res ) {
+
+		if ( !req.has_param( "year" ) ) {
+			sendError( res, 400, "parametro obbligatorio mancante: year" );
+			return;
+		}
+
+		try {
+			short year = static_cast<short>( std::stoi( req.get_param_value( "year" ) ) );
+			SeasonEvents seasons;
+			{
+				std::lock_guard<std::mutex> lock( g_engineMutex );
+				seasons = computeSeasons( year, system );
+			}
+			res.set_content( seasonsToJson( seasons ).dump(), "application/json" );
+
+		} catch ( const std::exception & e ) {
+			sendError( res, 500, std::string( "errore interno: " ) + e.what() );
+		}
+	} );
+
+	svr.Get( "/api/v1/moon/phase", [ &system ]( const httplib::Request & req, httplib::Response & res ) {
+
+		if ( !req.has_param( "jd" ) ) {
+			sendError( res, 400, "parametro obbligatorio mancante: jd" );
+			return;
+		}
+
+		try {
+			double jd = std::stod( req.get_param_value( "jd" ) );
+			MoonPhaseInfo info;
+			{
+				std::lock_guard<std::mutex> lock( g_engineMutex );
+				info = computeMoonPhase( jd, system );
+			}
+
+			json out = moonPhaseToJson( info );
+			out[ "jd" ] = jd;
+
+			res.set_content( out.dump(), "application/json" );
+
 		} catch ( const std::exception & e ) {
 			sendError( res, 500, std::string( "errore interno: " ) + e.what() );
 		}
