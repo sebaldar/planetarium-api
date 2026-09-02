@@ -1,0 +1,16 @@
+# build C++
+*.o
+*.so
+planetarium-svc
+
+# node / mcp
+mcp/node_modules/
+mcp/dist/
+
+# ambiente locale
+.env
+
+# editor / OS
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,22 @@
+services:
+  planetarium-api:
+    build: .
+    image: planetarium-api:latest
+    container_name: planetarium-api
+    restart: unless-stopped
+    # In produzione: bind SOLO sull'IP dell'interfaccia WireGuard, mai su
+    # 0.0.0.0. Esempio: "10.66.0.2:8484:8484"
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PLANETARIUM_PORT:-8484}:8484"
+    volumes:
+      - ./data/vsop87:/app/data/vsop87:ro
+      - ./data/elp:/app/data/elp:ro
+    environment:
+      - PLANETARIUM_PORT=8484
+      - PLANETARIUM_API_KEY=${PLANETARIUM_API_KEY:-}
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8484/api/v1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

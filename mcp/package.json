@@ -1,0 +1,19 @@
+{
+  "name": "planetarium-mcp",
+  "version": "0.1.0",
+  "description": "Adapter MCP: espone come tool per agenti/LLM le API di planetarium-api (posizione dei corpi celesti dato JD + lat/lon).",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
