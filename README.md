@@ -242,7 +242,13 @@ server {
 
 `mcp/` è un adapter sottile (Node/TypeScript, `@modelcontextprotocol/sdk`):
 traduce tool-call MCP in chiamate HTTP contro questo servizio. Non
-reimplementa alcun calcolo.
+reimplementa alcun calcolo. Supporta due transport, selezionabili via
+`MCP_TRANSPORT`:
+
+### stdio (default) — uso locale
+
+L'host MCP (Claude Code/Desktop) spawna il processo e comunica su
+stdin/stdout. Nessuna rete, nessuna porta da esporre.
 
 ```sh
 cd mcp
@@ -251,7 +257,34 @@ npm run build
 PLANETARIUM_API_URL=http://127.0.0.1:8484 npm start
 ```
 
-Tool esposti: `get_celestial_positions`, `list_supported_bodies`.
+### Streamable HTTP — servizio persistente in rete
+
+Utile se vuoi far girare l'MCP su dedalus (es. dietro lo stesso tunnel
+WireGuard di `planetarium-api`) e collegarti da un host MCP remoto,
+invece di spawnare il processo localmente ogni volta.
+
+```sh
+MCP_TRANSPORT=http \
+MCP_HTTP_PORT=8485 \
+MCP_BIND_ADDR=10.10.0.3 \
+MCP_API_KEY=<opzionale, stesso pattern di PLANETARIUM_API_KEY> \
+PLANETARIUM_API_URL=http://127.0.0.1:8484 \
+PLANETARIUM_API_KEY=<se planetarium-api la richiede> \
+npm start
+```
+
+Implementa la spec Streamable HTTP (endpoint unico `/mcp`, `POST` per le
+chiamate, sessione tracciata via header `Mcp-Session-Id`, `GET` per lo
+stream SSE server→client, `DELETE` per chiudere la sessione). Validato
+con handshake `initialize` → `notifications/initialized` → `tools/list` →
+`tools/call` reali via curl.
+
+`MCP_API_KEY` è opzionale e segue lo stesso schema di
+`PLANETARIUM_API_KEY` (vedi sezione deploy sopra): se impostata, richiede
+l'header `X-API-Key` su ogni richiesta a `/mcp`.
+
+Tool esposti: `get_celestial_positions`, `list_supported_bodies`,
+`get_sun_events`, `get_sun_seasons`, `get_moon_phase`.
 
 ## Estensioni future (fuori scope v1)
 
