@@ -20,3 +20,30 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+
+  planetarium-mcp:
+    build: ./mcp
+    image: planetarium-mcp:latest
+    container_name: planetarium-mcp
+    restart: unless-stopped
+    depends_on:
+      planetarium-api:
+        condition: service_healthy
+    # Stessa regola del servizio principale: bind SOLO sull'IP WireGuard,
+    # mai su 0.0.0.0. planetarium-api viene raggiunto via rete Docker
+    # interna (nome servizio), non attraverso il tunnel WG.
+    ports:
+      - "${BIND_ADDR:-10.10.0.3}:${MCP_HTTP_PORT:-8485}:8485"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_HTTP_PORT=8485
+      - MCP_BIND_ADDR=0.0.0.0
+      - MCP_API_KEY=${MCP_API_KEY:-}
+      - PLANETARIUM_API_URL=http://planetarium-api:8484
+      - PLANETARIUM_API_KEY=${PLANETARIUM_API_KEY:-}
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8485/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

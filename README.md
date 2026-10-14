@@ -203,37 +203,85 @@ ports:
   - "10.10.0.3:8484:8484"
 ```
 
-### `PLANETARIUM_API_KEY`: segreto interno nginx↔backend
+### `PLANETARIUM_API_KEY` / `MCP_API_KEY`: segreti interni nginx↔backend
+
+Due sottodomini distinti sulla VPS pubblica, ciascuno con il proprio vhost
+nginx e la propria chiave — confini di fiducia separati anche se entrambi
+attraversano lo stesso tunnel WG verso dedalus:
 
 ```
 client esterno ──(auth/TLS a discrezione di nginx)──> nginx (VPS pubblica)
                                                            │
-                                              inietta X-API-Key FISSA
+                                     api.planetarium.baldoweb.it
+                                     inietta X-API-Key FISSA (PLANETARIUM_API_KEY)
                                                            ▼
                                           dedalus:8484 (via WG, solo HTTP)
+
+client esterno / host MCP ──────────────────────────> nginx (VPS pubblica)
+                                                           │
+                                     mcp.planetarium.baldoweb.it
+                                     inietta X-API-Key FISSA (MCP_API_KEY)
+                                                           ▼
+                                          dedalus:8485 (via WG, solo HTTP)
 ```
 
-Non è un token che il client esterno deve conoscere: è nginx a iniettarlo,
-sempre uguale, su ogni richiesta proxata verso dedalus — indipendentemente
-da cosa manda il chiamante. Serve come seconda barriera nel caso la rete
+Non sono token che il client esterno deve conoscere: è nginx a iniettarli,
+sempre uguali, su ogni richiesta proxata verso dedalus — indipendentemente
+da cosa manda il chiamante. Servono come seconda barriera nel caso la rete
 WG sia condivisa con altri peer non fidati (con un tunnel punto-punto
 dedicato l'handshake WG è già di per sé un controllo d'accesso sufficiente,
-ma costa comunque poco tenerla attiva).
+ma costa comunque poco tenerla attiva). Sono due chiavi diverse perché
+proteggono due cose diverse: `PLANETARIUM_API_KEY` è il segreto tra
+nginx e il servizio REST (e, internamente, tra l'adapter MCP e il
+servizio REST — vedi `PLANETARIUM_API_KEY` nell'environment di
+`planetarium-mcp` in `docker-compose.yml`); `MCP_API_KEY` è il segreto
+tra nginx e l'endpoint `/mcp` esposto su `mcp.planetarium.baldoweb.it`.
 
-Generare la chiave con `openssl rand -hex 32`, metterla nel `.env` **sia**
-di dedalus (`PLANETARIUM_API_KEY=...`, mai in git) **sia** nella config
-nginx (stesso valore):
+Nota su `MCP_API_KEY`: essendo una chiave fissa iniettata da nginx, è
+adatta finché i consumer di `mcp.planetarium.baldoweb.it` sono client
+MCP propri (agenti/host che controlli tu). Se in futuro l'endpoint MCP
+verrà offerto a utenti/terzi esterni, questo schema non basta più:
+andrà sostituito con un'autenticazione per-utente (la spec MCP per
+server remoti prevede OAuth 2.1), perché una chiave condivisa non
+permette di identificare né revocare un singolo consumer.
+
+Generare entrambe le chiavi con `openssl rand -hex 32` (**diverse tra
+loro**), metterle nel `.env` di dedalus (`PLANETARIUM_API_KEY=...`,
+`MCP_API_KEY=...`, mai in git) **e** nella config nginx (stessi valori):
 
 ```nginx
 # /etc/nginx/secrets/planetarium.conf — permessi 600, root:root, MAI nel vhost pubblico
 set $planetarium_api_key "il-valore-generato-con-openssl";
+set $planetarium_mcp_key "un-altro-valore-generato-con-openssl";
 
 server {
-    location /planetarium/ {
+    server_name api.planetarium.baldoweb.it;
+
+    location / {
         include /etc/nginx/secrets/planetarium.conf;
         proxy_pass http://10.10.0.3:8484/;
         proxy_set_header X-API-Key $planetarium_api_key;   # fissa, non dal client
         limit_req zone=planetarium_rl burst=20 nodelay;
+    }
+}
+
+server {
+    server_name mcp.planetarium.baldoweb.it;
+
+    location / {
+        include /etc/nginx/secrets/planetarium.conf;
+        proxy_pass http://10.10.0.3:8485/;
+        proxy_set_header X-API-Key $planetarium_mcp_key;   # fissa, non dal client
+
+        # Streamable HTTP tiene la connessione aperta per lo stream SSE
+        # (GET) e usa header custom (Mcp-Session-Id): niente di esotico,
+        # ma niente buffering/timeout aggressivi da reverse proxy generico.
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+
+        limit_req zone=planetarium_mcp_rl burst=20 nodelay;
     }
 }
 ```
@@ -263,13 +311,31 @@ Utile se vuoi far girare l'MCP su dedalus (es. dietro lo stesso tunnel
 WireGuard di `planetarium-api`) e collegarti da un host MCP remoto,
 invece di spawnare il processo localmente ogni volta.
 
+Gira come secondo servizio nello stesso `docker-compose.yml` del backend
+(`planetarium-mcp`, build da `mcp/Dockerfile`): raggiunge `planetarium-api`
+via rete Docker interna (`http://planetarium-api:8484`, non attraverso il
+tunnel WG) e pubblica `/mcp` bindato allo stesso `BIND_ADDR` del servizio
+principale.
+
+```sh
+cp .env.example .env   # imposta anche MCP_API_KEY, openssl rand -hex 32
+docker compose up -d --build
+curl http://10.10.0.3:8485/healthz
+```
+
+`MCP_HTTP_PORT` (default `8485`) e `MCP_API_KEY` si impostano in `.env`
+insieme alle altre variabili — vedi `.env.example` e la sezione deploy
+sopra per il perché `MCP_API_KEY` è una chiave diversa da
+`PLANETARIUM_API_KEY`.
+
+Per uso locale senza Docker, lo stesso transport si avvia anche con
+`npm start`:
+
 ```sh
 MCP_TRANSPORT=http \
 MCP_HTTP_PORT=8485 \
-MCP_BIND_ADDR=10.10.0.3 \
-MCP_API_KEY=<opzionale, stesso pattern di PLANETARIUM_API_KEY> \
+MCP_BIND_ADDR=127.0.0.1 \
 PLANETARIUM_API_URL=http://127.0.0.1:8484 \
-PLANETARIUM_API_KEY=<se planetarium-api la richiede> \
 npm start
 ```
 
@@ -281,7 +347,8 @@ con handshake `initialize` → `notifications/initialized` → `tools/list` →
 
 `MCP_API_KEY` è opzionale e segue lo stesso schema di
 `PLANETARIUM_API_KEY` (vedi sezione deploy sopra): se impostata, richiede
-l'header `X-API-Key` su ogni richiesta a `/mcp`.
+l'header `X-API-Key` su ogni richiesta a `/mcp`. `/healthz` non richiede
+la chiave (liveness check, usato dall'`HEALTHCHECK` Docker).
 
 Tool esposti: `get_celestial_positions`, `list_supported_bodies`,
 `get_sun_events`, `get_sun_seasons`, `get_moon_phase`.

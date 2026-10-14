@@ -168,6 +168,13 @@ async function runHttp (): Promise<void> {
 
 	const httpServer = http.createServer( async ( req, res ) => {
 
+		// Liveness check, non richiede API key (stesso pattern di /api/v1/health
+		// sul servizio principale) — usato dall'HEALTHCHECK Docker.
+		if ( req.url === "/healthz" ) {
+			res.writeHead( 200, { "Content-Type": "application/json" } ).end( JSON.stringify( { status: "ok" } ) );
+			return;
+		}
+
 		if ( req.url !== "/mcp" ) {
 			res.writeHead( 404 ).end();
 			return;
